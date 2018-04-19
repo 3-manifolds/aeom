@@ -8,7 +8,7 @@
 #   A copy of the license file may be found at:
 #     http://www.gnu.org/licenses/old-licenses/gpl-2.0.html
 from __future__ import print_function
-import sys, os, socket, tempfile, shutil, multiprocessing, atexit, pickle
+import sys, os, socket, tempfile, shutil, multiprocessing, atexit, pickle, subprocess
 from .version import __version__
 assert sys.version_info.major > 2, 'Sorry, aeom requires Python 3.'
 
@@ -17,10 +17,13 @@ class Pending(object):
     An object of this class is returned by Asynchronizer.compute if the
     worker has not finished its computation yet.
     """
+    def __init__(self, pid=-1):
+        self.pid = pid
+        
     def __repr__(self):
-        return '<Pending computation>'
+        return '<Pending computation in %d>'%self.pid
 
-pending = Pending()
+#pending = Pending()
 
 class Asynchronizer(object):
     """
@@ -58,12 +61,12 @@ class Asynchronizer(object):
     eol = b'\r\n'
     
     def __init__(self):
-        self.socket = self.listener = None
+        self.socket = self.listener = self.home = None
         self.received = b''
         self.answers = {}
         family = socket.AF_INET if sys.platform == 'win32' else socket.AF_UNIX
         self.socket = socket.socket(family, socket.SOCK_STREAM)
-        if family == socket.AF_UNIX:
+        if family != socket.AF_INET:
             self.home = tempfile.mkdtemp(suffix='-Asynchronizer')
             self.socket_name = os.path.join(self.home, 'socket')
             self.socket.bind(self.socket_name)
@@ -78,6 +81,7 @@ class Asynchronizer(object):
         self.stop()
 
     def _listen(self):
+        self.listener = None
         self._workers = {}
         self.socket.listen(5)
         while 1:
@@ -85,11 +89,6 @@ class Asynchronizer(object):
             children = multiprocessing.active_children()
             self._connection = self.socket.accept()[0]
             line = self.read_line(self._connection)
-            if line == b'quit':
-                for worker in children:
-                    worker.terminate()
-                self._send('BYE', connection)
-                break
             self._run_command(line)
             self._connection.close()
         sys.exit()
@@ -129,14 +128,11 @@ class Asynchronizer(object):
                     # The answer will be cached by the main process.
                     self.answers.pop(arg)
                     self._workers.pop(arg)
-                else:
-                    response = pending
             else:
                 process = multiprocessing.Process(target=self._task, args=(arg,))
                 process.start()
-                self.answers[arg] = pending
+                self.answers[arg] = response = Pending(pid=process.pid)
                 self._workers[arg] = process
-                response = pending
         self._send(response)
 
     def _task(self, question):
@@ -169,11 +165,17 @@ class Asynchronizer(object):
         return line
 
     def stop(self):
-        if self.listener and self.listener.is_alive():
-            self.ask('quit')
-            self.listener.terminate()
-            self.listener = None
+        if sys.platform == 'win32':
+            if self.listener:
+                pid = str(self.listener.pid)
+                subprocess.call([r'C:\Windows\System32\taskkill',
+                                 '/F', '/T', '/PID', pid])
+        else:
+            for worker in multiprocessing.active_children():
+                worker.terminate()
+        self.listener = None
         if self.socket:
+            pass
             self.socket.close()
             self.socket = None
         if self.home:
