@@ -15,9 +15,11 @@ the answer has been computed.
 This is a pure Python module which is published on PyPi and installable
 with pip:
 
-| pip install aeom
+.. code:: bash
+   
+    pip install aeom
 
-The source code is `here <https://bitbucket.org/t3m/async>`_.
+The source code is `here <https://bitbucket.org/t3m/aeom>`_.
 
 License
 ========================
