@@ -11,15 +11,24 @@ from . import Asynchronizer, Pending
 
 # A test using a cpu-bound method of a SnapPy Manifold.
 def simple_test():
-    import snappy
-    from time import sleep
+    import snappy, time
     A = Asynchronizer()
-    M = snappy.Manifold('14n2345')
-    print('Computing Manifold("14n2345").covers(6) ...')
-    for n in range(15):
-        answer = A.compute(M.covers, args=(6,))
-        print('working for %d seconds'%n if isinstance(answer, Pending) else answer)
-        sleep(1)
-
+    M = snappy.Manifold('14n2346')
+    degree = 6
+    start = time.time()
+    print('Starting asynchronous %s.covers(%d).'%(M, degree))
+    A.compute(M.covers, args=(degree,))
+    print('Starting %s.covers(%d) in the main process.'%(M, degree))
+    answer1 = M.covers(degree)
+    print('Main process finished at %.1f'%(time.time() - start))
+    for n in range(30):
+        print('Checking aeom at %.1f seconds'%(time.time() - start))
+        answer2 = A.compute(M.covers, args=(degree,))
+        if not isinstance(answer2, Pending):
+            print('answer received at %.1f seconds'%(time.time()- start))
+            break
+        time.sleep(1)
+    print(answer1)
+    print(answer2)
 if __name__ == '__main__':
     simple_test()

@@ -8,7 +8,7 @@
 #   A copy of the license file may be found at:
 #     http://www.gnu.org/licenses/old-licenses/gpl-2.0.html
 from __future__ import print_function
-import sys, os, socket, tempfile, shutil, multiprocessing, atexit, pickle, subprocess
+import sys, os, socket, tempfile, shutil, multiprocessing, atexit, pickle, subprocess, hashlib, time
 from .version import __version__
 assert sys.version_info.major > 2, 'Sorry, aeom requires Python 3.'
 
@@ -81,6 +81,7 @@ class Asynchronizer(object):
         self.stop()
 
     def _listen(self):
+        #print('listener started as %d'%os.getpid())
         self.listener = None
         self._workers = {}
         self.socket.listen(5)
@@ -122,30 +123,40 @@ class Asynchronizer(object):
             # Prevent the dead worker from becoming a zombie.
             children = multiprocessing.active_children()
         elif command == 'compute':
+            #print(os.getpid(), 'compute: arg hash =', hashlib.md5(arg).hexdigest())
             if arg in self.answers:
                 response = self.answers[arg]
                 if not isinstance(response, Pending):
+                    #print(os.getpid(), 'compute: sending result')
                     # The answer will be cached by the main process.
                     self.answers.pop(arg)
                     self._workers.pop(arg)
             else:
-                process = multiprocessing.Process(target=self._task, args=(arg,))
+                #print(os.getpid(), 'compute: starting child process')
+                process = multiprocessing.Process(target=self._worker_task, args=(arg,))
                 process.start()
                 self.answers[arg] = response = Pending(pid=process.pid)
                 self._workers[arg] = process
         self._send(response)
-
-    def _task(self, question):
+        
+    def _worker_task(self, question):
         """
         Workers run this to compute their answer.
         """
+        start = time.time()
+        #print('worker started as %d'%os.getpid())
+        #print('unpickling question at %.2f'%(time.time() - start))
         method, args, kwargs = pickle.loads(question)
+        #print('starting computation at %.2f'%(time.time() - start))
         try:
             answer = method(*args, **kwargs)
         except:
             answer = 'Failed'
+        #print('pickling answer at %.2f'%(time.time() - start))
         arg = pickle.dumps((question, answer))
+        #print(os.getpid(), 'saving answer at %.2f seconds'%(time.time() - start))
         self.ask('save', arg)
+        #print(os.getpid(), 'done at %.2f seconds'%(time.time() - start))
         
     def read_line(self, receiver):
         """
