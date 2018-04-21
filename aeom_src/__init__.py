@@ -7,6 +7,7 @@
 #     https://bitbucket.org/t3m/aeom
 #   A copy of the license file may be found at:
 #     http://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+
 from __future__ import print_function
 import sys, os, socket, tempfile, shutil, multiprocessing, atexit, pickle, subprocess, hashlib, time
 from .version import __version__
@@ -19,11 +20,9 @@ class Pending(object):
     """
     def __init__(self, pid=-1):
         self.pid = pid
-        
-    def __repr__(self):
-        return '<Pending computation in %d>'%self.pid
 
-#pending = Pending()
+    def __repr__(self):
+        return '<Pending computation in process %d>'%self.pid
 
 class Asynchronizer(object):
     """
@@ -47,22 +46,24 @@ class Asynchronizer(object):
 
     Caveats:
 
-    * An Asynchronizer only works with objects and arguments that can be
-      pickled, as it needs to send them through a socket.
+    * Asynchronizer.compute requires that the method, arguments and result
+      can be pickled.
 
     * This does not work in Python 2.7 because the pickle module refuses
       to pickle methods which are "not found as __main__.method".
 
-    * If you use an Asynchronizer in a GUI app, create the object *before*
-      loading the GUI module. Forking in a GUI process is frowned upon or,
-      in the case of Apple, forbidden.
+    * To make the listener process as small as possible, create the
+      Asynchronizer object before importing other modules.  If you use an
+      Asynchronizer in a GUI app, it may be *required* to do this; forking a GUI
+      process is frowned upon or, at least in the case of Apple, forbidden.
     """
-    
+
     eol = b'\r\n'
-    
+
     def __init__(self):
         self.socket = self.listener = self.home = None
         self.received = b''
+        self.workers = {}
         self.answers = {}
         family = socket.AF_INET if sys.platform == 'win32' else socket.AF_UNIX
         self.socket = socket.socket(family, socket.SOCK_STREAM)
@@ -76,17 +77,14 @@ class Asynchronizer(object):
         self.listener = multiprocessing.Process(target=self._listen)
         self.listener.start()
         atexit.register(self.stop)
-        
+
     def __del__(self):
         self.stop()
 
     def _listen(self):
-        #print('listener started as %d'%os.getpid())
-        self.listener = None
-        self._workers = {}
         self.socket.listen(5)
         while 1:
-            # A side effect of calling this is that it cleans up zombies.
+            # A documented side effect of this is to clean up zombies.
             children = multiprocessing.active_children()
             self._connection = self.socket.accept()[0]
             line = self.read_line(self._connection)
@@ -94,70 +92,35 @@ class Asynchronizer(object):
             self._connection.close()
         sys.exit()
 
-    def _send(self, response):
-        """
-        Pickle a response and send it to the client.
-        """
-        try:
-            pickled = pickle.dumps(response)
-        except:
-            pickled = pickle.dumps('Not a picklable result')
-        self._connection.sendall(pickled + self.eol)
-
     def _run_command(self, line):
         if line.strip() == '':
             return
         words = line.split(None, 1) + [None]
         command, arg = words[:2]
         command = command.decode('utf-8')
-        response = 'Unknown command: %s.'%command
-        if command == 'save':
-            question, answer = pickle.loads(arg)
-            self.answers[question] = answer
-        if command == 'cancel':
-            worker = self._workers.pop(arg, None)
-            answer = self.answers.pop(arg, None)
-            if worker:
-                worker.terminate()
-            response = None
-            # Prevent the dead worker from becoming a zombie.
-            children = multiprocessing.active_children()
-        elif command == 'compute':
-            #print(os.getpid(), 'compute: arg hash =', hashlib.md5(arg).hexdigest())
-            if arg in self.answers:
-                response = self.answers[arg]
-                if not isinstance(response, Pending):
-                    #print(os.getpid(), 'compute: sending result')
-                    # The answer will be cached by the main process.
-                    self.answers.pop(arg)
-                    self._workers.pop(arg)
-            else:
-                #print(os.getpid(), 'compute: starting child process')
-                process = multiprocessing.Process(target=self._worker_task, args=(arg,))
-                process.start()
-                self.answers[arg] = response = Pending(pid=process.pid)
-                self._workers[arg] = process
-        self._send(response)
-        
-    def _worker_task(self, question):
+        if command == 'save': # arg = b'%s %s'%(qid, pickle)
+            qid, answer = arg.split(None, 1)
+            self.answers[qid] = answer
+            response = pickle.dumps('OK')
+        elif command == 'fetch': # arg = b'%s'%pid
+            response = self.answers.pop(arg, pickle.dumps(None))
+        else:
+            response = pickle.dumps('Unknown command')
+        self._connection.sendall(response + self.eol)
+
+    def worker_task(self, *args, **kwargs):
         """
         Workers run this to compute their answer.
         """
-        start = time.time()
-        #print('worker started as %d'%os.getpid())
-        #print('unpickling question at %.2f'%(time.time() - start))
-        method, args, kwargs = pickle.loads(question)
-        #print('starting computation at %.2f'%(time.time() - start))
+        qid, method = args[:2]
+        args = args[2:]
         try:
             answer = method(*args, **kwargs)
         except:
             answer = 'Failed'
-        #print('pickling answer at %.2f'%(time.time() - start))
-        arg = pickle.dumps((question, answer))
-        #print(os.getpid(), 'saving answer at %.2f seconds'%(time.time() - start))
+        arg = b'%s %s'%(qid, pickle.dumps(answer))
         self.ask('save', arg)
-        #print(os.getpid(), 'done at %.2f seconds'%(time.time() - start))
-        
+
     def read_line(self, receiver):
         """
         Read data from the receiver until eol is found and return everything before
@@ -193,14 +156,14 @@ class Asynchronizer(object):
             shutil.rmtree(self.home, True)
             self.home = None
 
-    def ask(self, question, argument=None):
+    def ask(self, request, argument=None):
         """
-        Send a question to the listener and return the pickled answer.  The question
+        Send a request to the listener and return a pickled response.  The request
         is a one-word string.  The optional argument is an arbitrary byte
-        sequence with no encoding, typically a pickle.  Neither the question nor
+        sequence with no encoding, typically a pickle.  Neither the request nor
         the argument should contain the eol marker (by default, carriage return
         followed by newline).
-        
+
         This method is not intended for humans, due to its use of byte sequences.
         """
         if not self.socket:
@@ -212,38 +175,66 @@ class Asynchronizer(object):
             raise RuntimeError('Could not connect to listener.')
             sock.close()
             return
-        data = question.encode('utf-8') + b' '
-        assert data.find(self.eol) < 0 , 'The question contains an eol mark.'
+        data = request.encode('utf-8') + b' '
+        assert data.find(self.eol) < 0 , 'The request contains an eol mark.'
         if argument:
             assert argument.find(self.eol) < 0 , 'The argument contains an eol mark.'
             data += argument
         sock.sendall(data + self.eol)
-        answer = self.read_line(sock)
+        response = self.read_line(sock)
         sock.close()
-        return answer
+        return response
 
-    def compute(self, method, args=tuple(), kwargs={}):
+    def get_qid(self, method, args, kwargs):
         """
-        Evaluate the method using the given args and kwargs.  The method should be
-        specified in dot notation, e.g. M.identify for the identify method of a
-        snappy Manifold object M.  The answer will be computed asynchronously by
-        a worker process and then cached.
-        
+        Generate a python-hashable unique identifier for (method, args, kwargs).
+        Note: the code in _run_command assumes that the qid is a byte sequence
+        that does not contain any spaces.
+        """
+        return hashlib.md5(pickle.dumps((method, args, kwargs))).digest()
+        # This might be faster, but would get confused if distinct args had the same repr.
+        # return hashlib.md5(('%s %s %s'%(method, args, kwargs)).encode('utf-8')).digest()
+
+    def compute(self, method, *args, **kwargs):
+        """
+        Asynchronously evaluate the method using the given args and kwargs.  The
+        method should be specified in dot notation, e.g. M.identify for the
+        identify method of a snappy Manifold object M.  Any args and kwargs
+        following the method will be passed to the method when it is called in
+        the worker process.
+
         The return value will be a Pending object if the worker has not finished.
         """
-        question = pickle.dumps((method, args, kwargs))
-        if question in self.answers:
-            return self.answers[question]
-        answer = pickle.loads(self.ask('compute', question))
-        if not isinstance(answer, Pending):
-            self.answers[question] = answer
+        qid = self.get_qid(method, args, kwargs)
+        if qid not in self.answers:
+            args = (qid, method) + args
+            process = multiprocessing.Process(target=self.worker_task,
+                                              args=args, kwargs=kwargs)
+            process.start()
+            self.answers[qid] = answer = Pending(pid=process.pid)
+            self.workers[qid] = process
+        else:
+            answer = self.answers[qid]
+            if isinstance(answer, Pending):
+                # Check if our worker has finished its computation.
+                fetched = pickle.loads(self.ask('fetch', qid))
+                if fetched is not None:
+                    self.answers[qid] = answer = fetched
+                    self.workers.pop(qid, None)
+                    # Prevent the dead worker from becoming a zombie.
+                    children = multiprocessing.active_children()
         return answer
 
     def cancel(self, method, args=tuple(), kwargs={}):
         """
         Cancel a pending computation - the worker process is terminated.
         """
-        question = pickle.dumps((method, args, kwargs))
-        if question not in self.answers:
-            self.ask('cancel', question)
-
+        qid = self.get_qid(method, args, kwargs)
+        answer = self.answers.get(qid, None)
+        if isinstance(answer, Pending):
+            self.answers.pop(qid)
+            worker = self.workers.pop(qid, None)
+            if worker and worker.is_alive():
+                worker.terminate()
+            # Prevent the dead worker from becoming a zombie.
+            children = multiprocessing.active_children()

@@ -17,15 +17,15 @@ def snappy_test():
     degree = 6
     start = time.time()
     print('Starting asynchronous %s.covers(%d).'%(M, degree))
-    A.compute(M.covers, args=(degree,))
+    A.compute(M.covers, degree)
     print('Starting %s.covers(%d) in the main process.'%(M, degree))
     answer1 = M.covers(degree)
-    print('Main process finished at %.1f'%(time.time() - start))
+    print('Main process finished at %.3f'%(time.time() - start))
     for n in range(30):
-        print('Checking aeom at %.1f seconds'%(time.time() - start))
-        answer2 = A.compute(M.covers, args=(degree,))
+        print('Checking aeom at %.3f seconds'%(time.time() - start))
+        answer2 = A.compute(M.covers, degree)
         if not isinstance(answer2, Pending):
-            print('answer received at %.1f seconds'%(time.time()- start))
+            print('answer received at %.3f seconds'%(time.time()- start))
             break
         time.sleep(1)
     print(answer1)
