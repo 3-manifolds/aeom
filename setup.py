@@ -1,7 +1,19 @@
-from setuptools import setup
+import os, sys, sysconfig
+from setuptools import setup, Command
 from aeom_src.version import __version__
 from aeom_src import Asynchronizer
 long_description = Asynchronizer.__doc__
+
+class AeomTest(Command):
+    user_options = []
+    def initialize_options(self):
+        pass 
+    def finalize_options(self):
+        pass
+    def run(self):
+        sys.path.insert(0, './build/lib')
+        from aeom.test import runtests
+        sys.exit(runtests())
 
 setup(name='aeom',
       version=__version__,
@@ -11,7 +23,7 @@ setup(name='aeom',
       python_requires='>=3',
       install_requires=['future'],
       entry_points = {},
-      cmdclass =  {},
+      cmdclass =  {'test' : AeomTest},
       zip_safe = True,
       description='An object which evaluates methods asynchronously', 
       long_description = long_description,

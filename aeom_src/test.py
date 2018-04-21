@@ -10,10 +10,10 @@
 from . import Asynchronizer, Pending
 
 # A test using a cpu-bound method of a SnapPy Manifold.
-def simple_test():
+def snappy_test():
     import snappy, time
     A = Asynchronizer()
-    M = snappy.Manifold('14n2346')
+    M = snappy.Manifold('K14n2345')
     degree = 6
     start = time.time()
     print('Starting asynchronous %s.covers(%d).'%(M, degree))
@@ -30,5 +30,9 @@ def simple_test():
         time.sleep(1)
     print(answer1)
     print(answer2)
+
+def runtests():
+    snappy_test()
+    
 if __name__ == '__main__':
-    simple_test()
+    runtests()
