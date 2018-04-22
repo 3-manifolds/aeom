@@ -21,6 +21,7 @@ def snappy_test():
     print('Starting %s.covers(%d) in the main process.'%(M, degree))
     answer1 = M.covers(degree)
     print('Main process finished at %.3f'%(time.time() - start))
+    time.sleep(0.05)
     for n in range(30):
         print('Checking aeom at %.3f seconds'%(time.time() - start))
         answer2 = A.compute(M.covers, degree)
