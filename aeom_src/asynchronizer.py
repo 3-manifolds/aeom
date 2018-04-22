@@ -8,7 +8,8 @@
 #   A copy of the license file may be found at:
 #     http://www.gnu.org/licenses/old-licenses/gpl-2.0.html
 
-import sys, os, socket, tempfile, shutil, multiprocessing, atexit, pickle, hashlib
+import sys, os, socket, tempfile, shutil, multiprocessing, atexit,\
+       pickle, hashlib, signal
 from .pending import Pending
 
 class Asynchronizer(object):
@@ -73,6 +74,11 @@ class Asynchronizer(object):
         self.stop()
 
     def _listen(self):
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            signal.signal(signal.SIGBREAK, signal.SIG_IGN)
+        except AttributeError:
+            pass
         self.socket.listen(5)
         while 1:
             # A documented side effect of this is to clean up zombies.
@@ -93,8 +99,9 @@ class Asynchronizer(object):
             qid, answer = arg.split(None, 1)
             self.answers[qid] = answer
             response = pickle.dumps('OK')
-        elif command == 'fetch': # arg = b'%s'%pid
-            response = self.answers.pop(arg, pickle.dumps(None))
+        elif command == 'fetch': # arg = b'%s'%qid
+            # If we don't recognize the qid, return it as a pickle.
+            response = self.answers.pop(arg, pickle.dumps(arg))
         else:
             response = pickle.dumps('Unknown command')
         self._connection.sendall(response + self.eol)
@@ -103,6 +110,11 @@ class Asynchronizer(object):
         """
         Workers run this to compute their answer.
         """
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            signal.signal(signal.SIGBREAK, signal.SIG_IGN)
+        except AttributeError:
+            pass
         qid, method = args[:2]
         args = args[2:]
         try:
@@ -167,6 +179,8 @@ class Asynchronizer(object):
         sock.sendall(data + self.eol)
         response = self.read_line(sock)
         sock.close()
+        # Clean up zombies, just for good measure.
+        children = multiprocessing.active_children()
         return response
 
     def get_qid(self, method, args, kwargs):
@@ -202,7 +216,8 @@ class Asynchronizer(object):
             if isinstance(answer, Pending):
                 # Check if our worker has finished its computation.
                 fetched = pickle.loads(self.ask('fetch', qid))
-                if fetched is not None:
+                # The listener returns the qid if it has no answer
+                if fetched != qid:
                     self.answers[qid] = answer = fetched
                     self.workers.pop(qid, None)
                     # Prevent the dead worker from becoming a zombie.
