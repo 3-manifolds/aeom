@@ -9,8 +9,10 @@
 #     http://www.gnu.org/licenses/old-licenses/gpl-2.0.html
 
 from __future__ import print_function
-import sys, os, socket, tempfile, shutil, multiprocessing, atexit, pickle, subprocess, hashlib, time
 from .version import __version__
+import sys, os, socket, tempfile, shutil, multiprocessing, atexit,\
+       pickle, hashlib
+
 assert sys.version_info.major > 2, 'Sorry, aeom requires Python 3.'
 
 class Pending(object):
@@ -139,17 +141,10 @@ class Asynchronizer(object):
         return line
 
     def stop(self):
-        if sys.platform == 'win32':
-            if self.listener:
-                pid = str(self.listener.pid)
-                subprocess.call([r'C:\Windows\System32\taskkill',
-                                 '/F', '/T', '/PID', pid])
-        else:
-            for worker in multiprocessing.active_children():
-                worker.terminate()
+        for worker in multiprocessing.active_children():
+            worker.terminate()
         self.listener = None
         if self.socket:
-            pass
             self.socket.close()
             self.socket = None
         if self.home:
@@ -238,3 +233,5 @@ class Asynchronizer(object):
                 worker.terminate()
             # Prevent the dead worker from becoming a zombie.
             children = multiprocessing.active_children()
+
+__all__ = ['Asynchronizer', 'Pending']
