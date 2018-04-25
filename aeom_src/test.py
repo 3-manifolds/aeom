@@ -7,6 +7,7 @@
 #     https://bitbucket.org/t3m/aeom
 #   A copy of the license file may be found at:
 #     http://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+from __future__ import print_function
 from . import Asynchronizer, Pending
 
 # A test using a cpu-bound method of a SnapPy Manifold.
@@ -15,12 +16,13 @@ def snappy_test():
     A = Asynchronizer()
     M = snappy.Manifold('K14n2345')
     degree = 6
-    start = time.time()
     print('Starting asynchronous %s.covers(%d).'%(M, degree))
+    start = time.time()
     A.compute(M.covers, degree)
     print('Starting %s.covers(%d) in the main process.'%(M, degree))
     answer1 = M.covers(degree)
-    print('Main process finished at %.3f'%(time.time() - start))
+    done = time.time()
+    print('Main process finished at %.3f.'%(done - start))
     time.sleep(0.05)
     for n in range(30):
         print('Checking aeom at %.3f seconds'%(time.time() - start))

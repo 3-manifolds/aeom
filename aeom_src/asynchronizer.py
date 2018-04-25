@@ -7,9 +7,14 @@
 #     https://bitbucket.org/t3m/aeom
 #   A copy of the license file may be found at:
 #     http://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+from __future__ import print_function
+import sys, os, socket, tempfile, shutil, multiprocessing, atexit, hashlib, signal
 
-import sys, os, socket, tempfile, shutil, multiprocessing, atexit,\
-       pickle, hashlib, signal
+if sys.version_info.major > 2:
+    from pickle import loads, dumps
+else:
+    from dill import loads, dumps
+
 from .pending import Pending
 
 class Asynchronizer(object):
@@ -92,20 +97,20 @@ class Asynchronizer(object):
     def _run_command(self, line):
         if line.strip() == '':
             return
-        words = line.split(None, 1) + [None]
+        words = line.split(b' ', 1) + [None]
         command, arg = words[:2]
         command = command.decode('utf-8')
         if command == 'save': # arg = b'%s %s'%(qid, pickle)
-            qid, answer = arg.split(None, 1)
+            qid, answer = arg.split(b' ', 1)
             self.answers[qid] = answer
-            response = pickle.dumps('OK')
+            response = dumps('OK')
         elif command == 'fetch': # arg = b'%s'%qid
             # If we don't recognize the qid, return it as a pickle.
-            response = self.answers.pop(arg, pickle.dumps(arg))
+            response = self.answers.pop(arg, dumps(arg))
         else:
-            response = pickle.dumps('Unknown command')
+            response = dumps('Unknown command')
         self._connection.sendall(response + self.eol)
-
+        
     def worker_task(self, *args, **kwargs):
         """
         Workers run this to compute their answer.
@@ -121,7 +126,7 @@ class Asynchronizer(object):
             answer = method(*args, **kwargs)
         except:
             answer = 'Failed'
-        arg = b'%s %s'%(qid, pickle.dumps(answer))
+        arg = b'%s %s'%(qid, dumps(answer))
         self.ask('save', arg)
 
     def read_line(self, receiver):
@@ -189,7 +194,7 @@ class Asynchronizer(object):
         Note: the code in _run_command assumes that the qid is a byte sequence
         that does not contain any spaces.
         """
-        return hashlib.md5(pickle.dumps((method, args, kwargs))).digest()
+        return hashlib.md5(dumps((method, args, kwargs))).digest()
         # This might be faster, but would get confused if distinct args had the same repr.
         # return hashlib.md5(('%s %s %s'%(method, args, kwargs)).encode('utf-8')).digest()
 
@@ -215,9 +220,9 @@ class Asynchronizer(object):
             answer = self.answers[qid]
             if isinstance(answer, Pending):
                 # Check if our worker has finished its computation.
-                fetched = pickle.loads(self.ask('fetch', qid))
+                fetched = loads(self.ask('fetch', qid))
                 # The listener returns the qid if it has no answer
-                if fetched != qid:
+                if not isinstance(fetched, bytes) or fetched != qid:
                     self.answers[qid] = answer = fetched
                     self.workers.pop(qid, None)
                     # Prevent the dead worker from becoming a zombie.
