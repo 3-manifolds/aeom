@@ -71,6 +71,8 @@ class Asynchronizer(object):
         else:
             self.socket.bind(('127.0.0.1', 0))
             self.socket_name = self.socket.getsockname()
+        self.queue = multiprocessing.Queue()
+        self.server = multiprocessing.Process(target=self.server_task)
         self.listener = multiprocessing.Process(target=self._listen)
         self.listener.start()
         atexit.register(self.stop)
@@ -128,6 +130,28 @@ class Asynchronizer(object):
             answer = 'Failed'
         arg = b'%s %s'%(qid, dumps(answer))
         self.ask('save', arg)
+
+    def server_task(self):
+        """
+        The server runs this.  It waits for a request to be added to the
+        queue and then computes the answer and sends it to the listener.
+        """
+        # We probably want the server to handle SIGINTs, as an abort signal.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            signal.signal(signal.SIGBREAK, signal.SIG_IGN)
+        except AttributeError:
+            pass
+        while True:
+            # Block until a question appears,
+            qid, method, args, kwargs = self.queue.get()
+            # then compute the answer.
+            try:
+                answer = method(*args, **kwargs)
+            except:
+                answer = 'Failed'
+            arg = b'%s %s'%(qid, dumps(answer))
+            self.ask('save', arg)
 
     def read_line(self, receiver):
         """
@@ -200,11 +224,9 @@ class Asynchronizer(object):
 
     def compute(self, method, *args, **kwargs):
         """
-        Asynchronously evaluate the method using the given args and kwargs.  The
-        method should be specified in dot notation, e.g. M.identify for the
-        identify method of a snappy Manifold object M.  Any args and kwargs
-        following the method will be passed to the method when it is called in
-        the worker process.
+        Asynchronously evaluate the method using the args and kwargs.  The method
+        should be specified in dot notation, e.g. M.identify for the identify
+        method of a snappy Manifold object M.
 
         The return value will be a Pending object if the worker has not finished.
         """
@@ -229,17 +251,57 @@ class Asynchronizer(object):
                     children = multiprocessing.active_children()
         return answer
 
-    def cancel(self, method, args=tuple(), kwargs={}):
+    def queue_compute(self, method, *args, **kwargs):
         """
-        Cancel a pending computation - the worker process is terminated.
+        Queue a request for the server to evaluate the method using the args
+        and kwargs.  The method should be specified in dot notation,
+        e.g. M.identify for the identify method of a snappy Manifold object
+        M.
+
+        The return value will be a Pending object until the server has
+        finished the computation.
+
+        When the startup overhead for a worker is large, e.g. when the method
+        is defined in a complex extension module *and* this is running on
+        Windows then a server may be faster than a worker since the server
+        only starts once.
+        """
+        if self.server.pid is None:
+            self.server.start()
+        qid = self.get_qid(method, args, kwargs)
+        if qid not in self.answers:
+            self.queue.put((qid, method, args, kwargs))
+            self.answers[qid] = answer = Pending(pid=self.server.pid)
+        else:
+            answer = self.answers[qid]
+            if isinstance(answer, Pending):
+                # Check if our worker has finished its computation.
+                fetched = loads(self.ask('fetch', qid))
+                # The listener returns the qid if it has no answer
+                if not isinstance(fetched, bytes) or fetched != qid:
+                    self.answers[qid] = answer = fetched
+                    self.workers.pop(qid, None)
+                    # Prevent the dead worker from becoming a zombie.
+                    children = multiprocessing.active_children()
+        return answer
+
+    def cancel(self, method, *args, **kwargs):
+        """
+        Cancel a pending computation - This terminates the process which
+        is working on the question.
         """
         qid = self.get_qid(method, args, kwargs)
         answer = self.answers.get(qid, None)
         if isinstance(answer, Pending):
             self.answers.pop(qid)
-            worker = self.workers.pop(qid, None)
-            if worker and worker.is_alive():
-                worker.terminate()
-            # Prevent the dead worker from becoming a zombie.
+            if answer.pid == self.server.pid:
+                process = self.server
+                self.server = multiprocessing.Process(target=self.server_task)
+            else:
+                process = self.workers.pop(qid, None)
+            if process and process.is_alive():
+                process.terminate()
+            # Prevent the dead process from becoming a zombie.
+            while process.is_alive():
+                pass
             children = multiprocessing.active_children()
-
