@@ -216,9 +216,9 @@ class Asynchronizer(object):
         """
         Generate a python-hashable unique identifier for (method, args, kwargs).
         Note: the code in _run_command assumes that the qid is a byte sequence
-        that does not contain any spaces.
+        that does not contain any spaces, which can happen with md5.digest.
         """
-        return hashlib.md5(dumps((method, args, kwargs))).digest()
+        return hashlib.md5(dumps((method, args, kwargs))).hexdigest().encode('ascii')
         # This might be faster, but would get confused if distinct args had the same repr.
         # return hashlib.md5(('%s %s %s'%(method, args, kwargs)).encode('utf-8')).digest()
 
