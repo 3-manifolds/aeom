@@ -1,12 +1,13 @@
 #   Copyright (C) 2018-present Marc Culler, Nathan Dunfield and others.
 #
-#   This program is distributed under the terms of the 
+#   This program is distributed under the terms of the
 #   GNU General Public License, version 2 or later, as published by
 #   the Free Software Foundation.  See the file gpl-2.0.txt for details.
 #   The URL for this program is
 #     https://bitbucket.org/t3m/aeom
 #   A copy of the license file may be found at:
 #     http://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+
 from __future__ import print_function
 import sys, os, socket, tempfile, shutil, multiprocessing, atexit, hashlib, signal
 
@@ -62,6 +63,7 @@ class Asynchronizer(object):
         self.received = b''
         self.workers = {}
         self.answers = {}
+        #self.queue = multiprocessing.Queue()
         family = socket.AF_INET if sys.platform == 'win32' else socket.AF_UNIX
         self.socket = socket.socket(family, socket.SOCK_STREAM)
         if family != socket.AF_INET:
@@ -71,13 +73,12 @@ class Asynchronizer(object):
         else:
             self.socket.bind(('127.0.0.1', 0))
             self.socket_name = self.socket.getsockname()
-        self.queue = multiprocessing.Queue()
-        self.server = multiprocessing.Process(target=self.server_task)
         self.listener = multiprocessing.Process(target=self._listen)
         self.listener.start()
         atexit.register(self.stop)
 
     def __del__(self):
+        # Just in case, this is a second chance to kill all subprocesses.
         self.stop()
 
     def _listen(self):
@@ -86,34 +87,67 @@ class Asynchronizer(object):
             signal.signal(signal.SIGBREAK, signal.SIG_IGN)
         except AttributeError:
             pass
+        self.server = multiprocessing.Process(target=self.server_task)
         self.socket.listen(5)
         while 1:
-            # A documented side effect of this is to clean up zombies.
+            # A documented side effect of this is to clean up zombie processes.
             children = multiprocessing.active_children()
             self._connection = self.socket.accept()[0]
             line = self.read_line(self._connection)
-            self._run_command(line)
+            stop = self._run_command(line)
             self._connection.close()
-        sys.exit()
+            if stop:
+                break
+        children = multiprocessing.active_children()
 
     def _run_command(self, line):
+        result = False
+        #print('listener received line:', line)
         if line.strip() == '':
-            return
+            return result
         words = line.split(b' ', 1) + [None]
         command, arg = words[:2]
         command = command.decode('utf-8')
-        if command == 'save': # arg = b'%s %s'%(qid, pickle)
+        if command == 'worker': # arg = b'%s %s'%(qid, pickled_question)
+            qid, arg = arg.split(b' ', 1)
+            method, args, kwargs = loads(arg)
+            process = multiprocessing.Process(target=self._worker_task,
+                                              args=(qid, method)+args,
+                                              kwargs=kwargs)
+            process.start()
+            self.workers[qid] = process
+            self.answers[qid] = response = dumps(Pending(pid=process.pid))
+        elif command == 'server':
+            if self.server.pid is None:
+                self.server.start()
+            elif not self.server.is_alive():
+                self.server = multiprocessing.Process(target=self.server_task)
+                self.server.start()
+                multiprocessing.active_children()
+            qid, arg = arg.split(b' ', 1)
+            method, args, kwargs = loads(arg)
+            #self.queue.put((qid, method, args, kwargs))
+            self.answers[qid] = response = dumps(Pending(pid=self.server.pid))
+        elif command == 'save': # arg = b'%s %s'%(qid, pickled_answer)
             qid, answer = arg.split(b' ', 1)
             self.answers[qid] = answer
+            self.workers.pop(qid, None)
+            multiprocessing.active_children()
             response = dumps('OK')
         elif command == 'fetch': # arg = b'%s'%qid
             # If we don't recognize the qid, return it as a pickle.
             response = self.answers.pop(arg, dumps(arg))
+        elif command == 'stop':
+            for worker in multiprocessing.active_children():
+                worker.terminate()
+            response = dumps('OK')
+            result = True
         else:
             response = dumps('Unknown command')
         self._connection.sendall(response + self.eol)
-        
-    def worker_task(self, *args, **kwargs):
+        return result
+    
+    def _worker_task(self, *args, **kwargs):
         """
         Workers run this to compute their answer.
         """
@@ -124,12 +158,15 @@ class Asynchronizer(object):
             pass
         qid, method = args[:2]
         args = args[2:]
+        #print(method)
         try:
             answer = method(*args, **kwargs)
-        except:
-            answer = 'Failed'
+        except Exception as e:
+            answer = 'Failed: %s'%e
         arg = b'%s %s'%(qid, dumps(answer))
+        #print('worker sending arg:', arg)
         self.ask('save', arg)
+#        sys.exit()
 
     def server_task(self):
         """
@@ -142,16 +179,19 @@ class Asynchronizer(object):
             signal.signal(signal.SIGBREAK, signal.SIG_IGN)
         except AttributeError:
             pass
+        #print('server started')
         while True:
             # Block until a question appears,
-            qid, method, args, kwargs = self.queue.get()
+            #qid, method, args, kwargs = self.queue.get()
+            #print('server:', method, args, kwargs)
             # then compute the answer.
             try:
                 answer = method(*args, **kwargs)
-            except:
-                answer = 'Failed'
+            except Exception as e:
+                answer = 'Failed: %s'%e
             arg = b'%s %s'%(qid, dumps(answer))
             self.ask('save', arg)
+        sys.exit()
 
     def read_line(self, receiver):
         """
@@ -171,9 +211,12 @@ class Asynchronizer(object):
         return line
 
     def stop(self):
-        for worker in multiprocessing.active_children():
-            worker.terminate()
-        self.listener = None
+        #print('Stopping')
+        if self.listener.is_alive():
+            response = self.ask('stop')
+            self.listener.join(2)
+            if self.listener.is_alive():
+                self.listener.terminate()
         if self.socket:
             self.socket.close()
             self.socket = None
@@ -203,13 +246,11 @@ class Asynchronizer(object):
         data = request.encode('utf-8') + b' '
         assert data.find(self.eol) < 0 , 'The request contains an eol mark.'
         if argument:
-            assert argument.find(self.eol) < 0 , 'The argument contains an eol mark.'
+            assert argument.find(self.eol) < 0 , 'The argument contains an eol mark:\n%s'%argument
             data += argument
         sock.sendall(data + self.eol)
         response = self.read_line(sock)
         sock.close()
-        # Clean up zombies, just for good measure.
-        children = multiprocessing.active_children()
         return response
 
     def get_qid(self, method, args, kwargs):
@@ -218,7 +259,8 @@ class Asynchronizer(object):
         Note: the code in _run_command assumes that the qid is a byte sequence
         that does not contain any spaces.
         """
-        return hashlib.md5(dumps((method, args, kwargs))).digest()
+        args = dumps((method, args, kwargs))
+        return hashlib.md5(args).hexdigest().encode('ascii'), args
         # This might be faster, but would get confused if distinct args had the same repr.
         # return hashlib.md5(('%s %s %s'%(method, args, kwargs)).encode('utf-8')).digest()
 
@@ -230,25 +272,16 @@ class Asynchronizer(object):
 
         The return value will be a Pending object if the worker has not finished.
         """
-        qid = self.get_qid(method, args, kwargs)
-        if qid not in self.answers:
-            args = (qid, method) + args
-            process = multiprocessing.Process(target=self.worker_task,
-                                              args=args, kwargs=kwargs)
-            process.start()
-            self.answers[qid] = answer = Pending(pid=process.pid)
-            self.workers[qid] = process
-        else:
-            answer = self.answers[qid]
-            if isinstance(answer, Pending):
-                # Check if our worker has finished its computation.
-                fetched = loads(self.ask('fetch', qid))
-                # The listener returns the qid if it has no answer
-                if not isinstance(fetched, bytes) or fetched != qid:
-                    self.answers[qid] = answer = fetched
-                    self.workers.pop(qid, None)
-                    # Prevent the dead worker from becoming a zombie.
-                    children = multiprocessing.active_children()
+        qid, args = self.get_qid(method, args, kwargs)
+        try:
+            return self.answers[qid]
+        except KeyError:
+            pass
+        answer = loads(self.ask('fetch', qid))
+        if isinstance(answer, bytes) and answer == qid:
+            answer = loads(self.ask('worker', qid + b' ' + args))
+        if not isinstance(answer, Pending):
+            self.answers[qid] = answer
         return answer
 
     def queue_compute(self, method, *args, **kwargs):
@@ -266,23 +299,16 @@ class Asynchronizer(object):
         Windows then a server may be faster than a worker since the server
         only starts once.
         """
-        if self.server.pid is None:
-            self.server.start()
-        qid = self.get_qid(method, args, kwargs)
-        if qid not in self.answers:
-            self.queue.put((qid, method, args, kwargs))
-            self.answers[qid] = answer = Pending(pid=self.server.pid)
-        else:
-            answer = self.answers[qid]
-            if isinstance(answer, Pending):
-                # Check if our worker has finished its computation.
-                fetched = loads(self.ask('fetch', qid))
-                # The listener returns the qid if it has no answer
-                if not isinstance(fetched, bytes) or fetched != qid:
-                    self.answers[qid] = answer = fetched
-                    self.workers.pop(qid, None)
-                    # Prevent the dead worker from becoming a zombie.
-                    children = multiprocessing.active_children()
+        qid, args = self.get_qid(method, args, kwargs)
+        try:
+            return self.answers[qid]
+        except KeyError:
+            pass
+        answer = loads(self.ask('fetch', qid))
+        if isinstance(answer, bytes) and answer == qid:
+            answer = loads(self.ask('server', qid + b' ' + args))
+        if not isinstance(answer, Pending):
+            self.answers[qid] = answer
         return answer
 
     def cancel(self, method, *args, **kwargs):
@@ -290,7 +316,7 @@ class Asynchronizer(object):
         Cancel a pending computation - This terminates the process which
         is working on the question.
         """
-        qid = self.get_qid(method, args, kwargs)
+        qid, args = self.get_qid(method, args, kwargs)
         answer = self.answers.get(qid, None)
         if isinstance(answer, Pending):
             self.answers.pop(qid)

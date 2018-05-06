@@ -31,11 +31,28 @@ def snappy_test():
             print('answer received at %.3f seconds'%(time.time()- start))
             break
         time.sleep(1)
+    A.stop()
     print(answer1)
     print(answer2)
 
+def volume_test():
+    import snappy, time
+    A = Asynchronizer()
+    for M in snappy.OrientableCuspedCensus[:300]:
+        try:
+            while True:
+                result = A.compute(M.volume)
+                if not isinstance(result, Pending):
+                    break
+                time.sleep(0.2)
+            print(M, 'OK' if abs(float(M.volume()) - float(result)) < 10**-13 else 'FAILED')
+        except Exception as e:
+            print(M, e)
+    A.stop()
+    
 def runtests():
     snappy_test()
+    volume_test()
     
 if __name__ == '__main__':
     runtests()
